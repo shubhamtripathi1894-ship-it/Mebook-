@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "48261208839",
+    "project_id": "mebook-28d37",
+    "storage_bucket": "mebook-28d37.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:48261208839:android:3bf41e22a64a4aa8c643a2",
+        "android_client_info": {
+          "package_name": "com.mebook.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "48261208839-uf74lt34nh4akidvroin8i2rsjnvid2q.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA_55Dv8fu5H_HDIP700Tkr59SLs3obJmo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "48261208839-uf74lt34nh4akidvroin8i2rsjnvid2q.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
