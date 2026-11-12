@@ -312,12 +312,13 @@ jobs:
         }
         EOF
 
-        # 10. MainActivity.java (Google Login Popup & Blank Screen FIX)
+        # 10. MainActivity.java (Google Login Complete Fix with hasVisitedGoogle check)
         cat << 'EOF' > app/src/main/java/com/mebook/app/MainActivity.java
         package com.mebook.app;
         import android.Manifest;
         import android.app.Dialog;
         import android.content.pm.PackageManager;
+        import android.graphics.Bitmap;
         import android.graphics.Color;
         import android.os.Build;
         import android.os.Bundle;
@@ -363,7 +364,6 @@ jobs:
                 cm.setAcceptCookie(true);
                 cm.setAcceptThirdPartyCookies(webView, true);
 
-                // UserAgent for Google Login
                 String ua = s.getUserAgentString().replace("; wv", "");
                 s.setUserAgentString(ua);
 
@@ -374,7 +374,6 @@ jobs:
                         runOnUiThread(() -> request.grant(request.getResources()));
                     }
 
-                    // Popup Window for Google Auth
                     @Override
                     public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
                         WebView popView = new WebView(MainActivity.this);
@@ -400,13 +399,24 @@ jobs:
                         });
 
                         popView.setWebViewClient(new WebViewClient() {
+                            private boolean hasVisitedGoogle = false;
+
+                            @Override
+                            public void onPageStarted(WebView v, String url, Bitmap favicon) {
+                                super.onPageStarted(v, url, favicon);
+                                if (url != null && (url.contains("accounts.google.com") || url.contains("google.com/signin") || url.contains("oauth"))) {
+                                    hasVisitedGoogle = true;
+                                }
+                            }
+
                             @Override
                             public void onPageFinished(WebView v, String url) {
                                 super.onPageFinished(v, url);
-                                if (url != null && url.contains("/__/auth/handler")) {
+                                // Sirf tabhi close hoga jab Google par login complete ho chuka ho
+                                if (hasVisitedGoogle && url != null && url.contains("/__/auth/handler")) {
                                     v.postDelayed(() -> {
                                         if (dialog.isShowing()) dialog.dismiss();
-                                    }, 1200);
+                                    }, 800);
                                 }
                             }
                         });
