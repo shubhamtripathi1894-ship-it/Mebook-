@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
+    - name: Checkout Repository
       uses: actions/checkout@v4
 
     - name: Set up JDK 17
@@ -19,10 +19,16 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
+    - name: Setup Gradle
+      run: |
+        curl -s -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.5-bin.zip
+        unzip -q gradle.zip
 
-    - name: Create Native App with Vercel Link
+    - name: Accept Android Licenses
+      run: |
+        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
+
+    - name: Create Native App Files
       run: |
         mkdir -p app/src/main/java/com/mebook/app
         mkdir -p app/src/main/res/layout
@@ -32,7 +38,7 @@ jobs:
           cp google-services.json app/google-services.json
         fi
 
-        # Root build.gradle
+        # 1. Root build.gradle
         cat << 'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -44,10 +50,17 @@ jobs:
         allprojects { repositories { google(); mavenCentral() } }
         EOF
 
-        # settings.gradle
+        # 2. settings.gradle
         echo "include ':app'" > settings.gradle
 
-        # app/build.gradle
+        # 3. strings.xml
+        cat << 'EOF' > app/src/main/res/values/strings.xml
+        <resources>
+            <string name="app_name">MeBook</string>
+        </resources>
+        EOF
+
+        # 4. app/build.gradle (Auto-Signed for 1-click install)
         cat << 'EOF' > app/build.gradle
         plugins {
             id 'com.android.application'
@@ -66,6 +79,7 @@ jobs:
             buildTypes {
                 release {
                     minifyEnabled false
+                    signingConfig signingConfigs.debug
                 }
             }
             compileOptions {
@@ -81,7 +95,7 @@ jobs:
         }
         EOF
 
-        # AndroidManifest.xml
+        # 5. AndroidManifest.xml
         cat << 'EOF' > app/src/main/AndroidManifest.xml
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.mebook.app">
@@ -107,7 +121,6 @@ jobs:
                     </intent-filter>
                 </activity>
 
-                <!-- Full Screen Incoming Call Screen -->
                 <activity
                     android:name=".CallActivity"
                     android:exported="true"
@@ -124,7 +137,7 @@ jobs:
         </manifest>
         EOF
 
-        # Layout for Incoming Call
+        # 6. Incoming Call Layout
         cat << 'EOF' > app/src/main/res/layout/activity_call.xml
         <?xml version="1.0" encoding="utf-8"?>
         <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -178,7 +191,7 @@ jobs:
         </RelativeLayout>
         EOF
 
-        # CallActivity.java
+        # 7. CallActivity.java
         cat << 'EOF' > app/src/main/java/com/mebook/app/CallActivity.java
         package com.mebook.app;
         import android.app.KeyguardManager;
@@ -243,7 +256,7 @@ jobs:
         }
         EOF
 
-        # MyFCMService.java
+        # 8. MyFCMService.java
         cat << 'EOF' > app/src/main/java/com/mebook/app/MyFCMService.java
         package com.mebook.app;
         import android.app.NotificationChannel;
@@ -292,7 +305,7 @@ jobs:
         }
         EOF
 
-        # MainActivity.java (Pointing directly to your live Vercel URL + Google Login Fix)
+        # 9. MainActivity.java (Live Vercel Link + No Blank Screen)
         cat << 'EOF' > app/src/main/java/com/mebook/app/MainActivity.java
         package com.mebook.app;
         import android.Manifest;
@@ -331,7 +344,7 @@ jobs:
                 s.setDatabaseEnabled(true);
                 s.setMediaPlaybackRequiresUserGesture(false);
 
-                // Google Login Blank Screen FIX
+                // Fix Google Login Blank Screen
                 String ua = s.getUserAgentString().replace("; wv", "");
                 s.setUserAgentString(ua);
 
@@ -343,7 +356,6 @@ jobs:
                     }
                 });
 
-                // Directly load your live Vercel webapp
                 webView.loadUrl("https://mebook-rho.vercel.app/");
             }
 
@@ -355,11 +367,8 @@ jobs:
         }
         EOF
 
-    - name: Build APK
-      run: |
-        gradle wrapper
-        chmod +x gradlew
-        ./gradlew assembleRelease
+    - name: Compile Release APK
+      run: ./gradle-8.5/bin/gradle assembleRelease --stacktrace
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
