@@ -1,4 +1,4 @@
-name: Build MeBook Native APK
+name: Build MeBook Native APK with Ringtone & Icon
 
 on:
   push:
@@ -28,24 +28,90 @@ jobs:
       run: |
         yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
 
-    - name: Create Native App Files
+    - name: Create Native App Files, Icon & Melodious Ringtone
       run: |
         mkdir -p app/src/main/java/com/mebook/app
         mkdir -p app/src/main/res/layout
         mkdir -p app/src/main/res/values
+        mkdir -p app/src/main/res/drawable
+        mkdir -p app/src/main/res/raw
+        mkdir -p app/src/main/res/mipmap-anydpi-v26
 
         if [ -f "google-services.json" ]; then
           cp google-services.json app/google-services.json
         fi
 
-        # 1. gradle.properties
+        # 1. Generate Melodious Soft Chime Ringtone (Sweet Flute/Harp Chimes)
+        python3 -c "
+        import math, struct, wave
+        rate = 44100
+        dur = 3.2
+        samples = []
+        notes = [
+            (0.0, 0.7, 659.25),   # E5 (Soft Flute Bell)
+            (0.3, 0.7, 830.61),   # G#5
+            (0.6, 0.8, 987.77),   # B5
+            (1.0, 1.4, 1318.51)   # E6 (Sweet High Chime)
+        ]
+        for i in range(int(rate * dur)):
+            t = i / rate
+            s = 0.0
+            for st, ndur, f in notes:
+                if st <= t < st + ndur:
+                    nt = t - st
+                    env = math.exp(-nt * 3.2)
+                    wave_val = math.sin(2 * math.pi * f * nt) + 0.3 * math.sin(4 * math.pi * f * nt)
+                    s += wave_val * env
+            s = max(-0.8, min(0.8, s))
+            samples.append(int(s * 32767))
+        with wave.open('app/src/main/res/raw/mebook_ringtone.wav', 'wb') as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(struct.pack('<' + ('h' * len(samples)), *samples))
+        "
+
+        # 2. App Icon Background (Golden Yellow)
+        cat << 'EOF' > app/src/main/res/drawable/ic_launcher_background.xml
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp"
+            android:height="108dp"
+            android:viewportWidth="100"
+            android:viewportHeight="100">
+            <path android:fillColor="#F5D76E" android:pathData="M0,0 h100 v100 h-100 Z" />
+        </vector>
+        EOF
+
+        # 3. App Icon Foreground (Bold MeBook 'M')
+        cat << 'EOF' > app/src/main/res/drawable/ic_launcher_foreground.xml
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp"
+            android:height="108dp"
+            android:viewportWidth="100"
+            android:viewportHeight="100">
+            <path android:fillColor="#1A1200"
+                android:pathData="M28,26 L38,26 L50,52 L62,26 L72,26 L72,74 L62,74 L62,42 L53,62 L47,62 L38,42 L38,74 L28,74 Z" />
+        </vector>
+        EOF
+
+        # 4. Adaptive Icon for Android 8 to 15
+        cat << 'EOF' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+        <?xml version="1.0" encoding="utf-8"?>
+        <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@drawable/ic_launcher_background" />
+            <foreground android:drawable="@drawable/ic_launcher_foreground" />
+        </adaptive-icon>
+        EOF
+        cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+        # 5. gradle.properties
         cat << 'EOF' > gradle.properties
         android.useAndroidX=true
         android.enableJetifier=true
         org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
         EOF
 
-        # 2. Root build.gradle
+        # 6. Root build.gradle
         cat << 'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -57,17 +123,17 @@ jobs:
         allprojects { repositories { google(); mavenCentral() } }
         EOF
 
-        # 3. settings.gradle
+        # 7. settings.gradle
         echo "include ':app'" > settings.gradle
 
-        # 4. strings.xml
+        # 8. strings.xml
         cat << 'EOF' > app/src/main/res/values/strings.xml
         <resources>
             <string name="app_name">MeBook</string>
         </resources>
         EOF
 
-        # 5. app/build.gradle
+        # 9. app/build.gradle
         cat << 'EOF' > app/build.gradle
         plugins {
             id 'com.android.application'
@@ -102,7 +168,7 @@ jobs:
         }
         EOF
 
-        # 6. AndroidManifest.xml
+        # 10. AndroidManifest.xml (With Icon & Ringtone permissions)
         cat << 'EOF' > app/src/main/AndroidManifest.xml
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.mebook.app">
@@ -117,6 +183,8 @@ jobs:
 
             <application
                 android:allowBackup="true"
+                android:icon="@mipmap/ic_launcher"
+                android:roundIcon="@mipmap/ic_launcher_round"
                 android:label="MeBook"
                 android:theme="@style/Theme.AppCompat.NoActionBar"
                 android:usesCleartextTraffic="true">
@@ -144,7 +212,82 @@ jobs:
         </manifest>
         EOF
 
-        # 7. Incoming Call Layout
+        # 11. CallActivity.java (Plays Sweet Custom Ringtone)
+        cat << 'EOF' > app/src/main/java/com/mebook/app/CallActivity.java
+        package com.mebook.app;
+        import android.app.KeyguardManager;
+        import android.content.Context;
+        import android.content.Intent;
+        import android.media.AudioAttributes;
+        import android.media.MediaPlayer;
+        import android.media.RingtoneManager;
+        import android.os.Build;
+        import android.os.Bundle;
+        import android.os.Vibrator;
+        import android.view.WindowManager;
+        import android.widget.Button;
+        import android.widget.TextView;
+        import androidx.appcompat.app.AppCompatActivity;
+
+        public class CallActivity extends AppCompatActivity {
+            private MediaPlayer player;
+            private Vibrator vibrator;
+
+            @Override
+            protected void onCreate(Bundle savedInstanceState) {
+                super.onCreate(savedInstanceState);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    setShowWhenLocked(true);
+                    setTurnScreenOn(true);
+                    KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+                    if (km != null) km.requestDismissKeyguard(this, null);
+                } else {
+                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                        WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
+                        WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+                }
+                setContentView(R.layout.activity_call);
+
+                String name = getIntent().getStringExtra("caller");
+                ((TextView) findViewById(R.id.callerName)).setText(name != null ? name : "Someone");
+
+                // Sweet Melodious Ringtone + Gentle Vibration
+                try {
+                    player = MediaPlayer.create(this, R.raw.mebook_ringtone);
+                    if (player == null) {
+                        player = MediaPlayer.create(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE));
+                    }
+                    player.setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build());
+                    player.setLooping(true);
+                    player.start();
+
+                    vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                    if (vibrator != null) vibrator.vibrate(new long[]{0, 800, 1200}, 0);
+                } catch (Exception ignored) {}
+
+                findViewById(R.id.btnDecline).setOnClickListener(v -> finish());
+                findViewById(R.id.btnAccept).setOnClickListener(v -> {
+                    Intent i = new Intent(this, MainActivity.class);
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    startActivity(i);
+                    finish();
+                });
+            }
+
+            @Override
+            protected void onDestroy() {
+                super.onDestroy();
+                if (player != null) { try { player.stop(); player.release(); } catch(Exception ignored){} }
+                if (vibrator != null) vibrator.cancel();
+            }
+        }
+        EOF
+
+        # 12. Call Screen UI Layout
         cat << 'EOF' > app/src/main/res/layout/activity_call.xml
         <?xml version="1.0" encoding="utf-8"?>
         <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -198,72 +341,7 @@ jobs:
         </RelativeLayout>
         EOF
 
-        # 8. CallActivity.java
-        cat << 'EOF' > app/src/main/java/com/mebook/app/CallActivity.java
-        package com.mebook.app;
-        import android.app.KeyguardManager;
-        import android.content.Context;
-        import android.content.Intent;
-        import android.media.MediaPlayer;
-        import android.media.RingtoneManager;
-        import android.os.Build;
-        import android.os.Bundle;
-        import android.os.Vibrator;
-        import android.view.WindowManager;
-        import android.widget.Button;
-        import android.widget.TextView;
-        import androidx.appcompat.app.AppCompatActivity;
-
-        public class CallActivity extends AppCompatActivity {
-            private MediaPlayer player;
-            private Vibrator vibrator;
-
-            @Override
-            protected void onCreate(Bundle savedInstanceState) {
-                super.onCreate(savedInstanceState);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                    setShowWhenLocked(true);
-                    setTurnScreenOn(true);
-                    KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
-                    if (km != null) km.requestDismissKeyguard(this, null);
-                } else {
-                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                        WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
-                        WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
-                }
-                setContentView(R.layout.activity_call);
-
-                String name = getIntent().getStringExtra("caller");
-                ((TextView) findViewById(R.id.callerName)).setText(name != null ? name : "Someone");
-
-                try {
-                    player = MediaPlayer.create(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE));
-                    player.setLooping(true);
-                    player.start();
-                    vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
-                    if (vibrator != null) vibrator.vibrate(new long[]{0, 1000, 1000}, 0);
-                } catch (Exception ignored) {}
-
-                findViewById(R.id.btnDecline).setOnClickListener(v -> finish());
-                findViewById(R.id.btnAccept).setOnClickListener(v -> {
-                    Intent i = new Intent(this, MainActivity.class);
-                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    startActivity(i);
-                    finish();
-                });
-            }
-
-            @Override
-            protected void onDestroy() {
-                super.onDestroy();
-                if (player != null) { try { player.stop(); player.release(); } catch(Exception ignored){} }
-                if (vibrator != null) vibrator.cancel();
-            }
-        }
-        EOF
-
-        # 9. MyFCMService.java
+        # 13. MyFCMService.java
         cat << 'EOF' > app/src/main/java/com/mebook/app/MyFCMService.java
         package com.mebook.app;
         import android.app.NotificationChannel;
@@ -312,7 +390,7 @@ jobs:
         }
         EOF
 
-        # 10. MainActivity.java (Google Login Complete Fix with hasVisitedGoogle check)
+        # 14. MainActivity.java
         cat << 'EOF' > app/src/main/java/com/mebook/app/MainActivity.java
         package com.mebook.app;
         import android.Manifest;
@@ -412,7 +490,6 @@ jobs:
                             @Override
                             public void onPageFinished(WebView v, String url) {
                                 super.onPageFinished(v, url);
-                                // Sirf tabhi close hoga jab Google par login complete ho chuka ho
                                 if (hasVisitedGoogle && url != null && url.contains("/__/auth/handler")) {
                                     v.postDelayed(() -> {
                                         if (dialog.isShowing()) dialog.dismiss();
