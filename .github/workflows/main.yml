@@ -38,7 +38,7 @@ jobs:
           cp google-services.json app/google-services.json
         fi
 
-        # 1. gradle.properties (Fix for AndroidX error)
+        # 1. gradle.properties
         cat << 'EOF' > gradle.properties
         android.useAndroidX=true
         android.enableJetifier=true
@@ -67,7 +67,7 @@ jobs:
         </resources>
         EOF
 
-        # 5. app/build.gradle (Auto-Signed)
+        # 5. app/build.gradle
         cat << 'EOF' > app/build.gradle
         plugins {
             id 'com.android.application'
@@ -144,7 +144,7 @@ jobs:
         </manifest>
         EOF
 
-        # 7. Incoming Call UI Layout
+        # 7. Incoming Call Layout
         cat << 'EOF' > app/src/main/res/layout/activity_call.xml
         <?xml version="1.0" encoding="utf-8"?>
         <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -312,13 +312,17 @@ jobs:
         }
         EOF
 
-        # 10. MainActivity.java (Live Vercel Link)
+        # 10. MainActivity.java (Google Login Popup & Blank Screen FIX)
         cat << 'EOF' > app/src/main/java/com/mebook/app/MainActivity.java
         package com.mebook.app;
         import android.Manifest;
+        import android.app.Dialog;
         import android.content.pm.PackageManager;
+        import android.graphics.Color;
         import android.os.Build;
         import android.os.Bundle;
+        import android.os.Message;
+        import android.webkit.CookieManager;
         import android.webkit.PermissionRequest;
         import android.webkit.WebChromeClient;
         import android.webkit.WebSettings;
@@ -345,13 +349,21 @@ jobs:
                     ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA}, 101);
                 }
 
+                webView.setBackgroundColor(Color.parseColor("#0D0A04"));
+
                 WebSettings s = webView.getSettings();
                 s.setJavaScriptEnabled(true);
                 s.setDomStorageEnabled(true);
                 s.setDatabaseEnabled(true);
+                s.setSupportMultipleWindows(true);
+                s.setJavaScriptCanOpenWindowsAutomatically(true);
                 s.setMediaPlaybackRequiresUserGesture(false);
 
-                // Fix Google Login Blank Screen
+                CookieManager cm = CookieManager.getInstance();
+                cm.setAcceptCookie(true);
+                cm.setAcceptThirdPartyCookies(webView, true);
+
+                // UserAgent for Google Login
                 String ua = s.getUserAgentString().replace("; wv", "");
                 s.setUserAgentString(ua);
 
@@ -360,6 +372,49 @@ jobs:
                     @Override
                     public void onPermissionRequest(final PermissionRequest request) {
                         runOnUiThread(() -> request.grant(request.getResources()));
+                    }
+
+                    // Popup Window for Google Auth
+                    @Override
+                    public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
+                        WebView popView = new WebView(MainActivity.this);
+                        WebSettings popSettings = popView.getSettings();
+                        popSettings.setJavaScriptEnabled(true);
+                        popSettings.setDomStorageEnabled(true);
+                        popSettings.setSupportMultipleWindows(true);
+                        popSettings.setJavaScriptCanOpenWindowsAutomatically(true);
+
+                        String popUa = popSettings.getUserAgentString().replace("; wv", "");
+                        popSettings.setUserAgentString(popUa);
+                        cm.setAcceptThirdPartyCookies(popView, true);
+
+                        final Dialog dialog = new Dialog(MainActivity.this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+                        dialog.setContentView(popView);
+                        dialog.show();
+
+                        popView.setWebChromeClient(new WebChromeClient() {
+                            @Override
+                            public void onCloseWindow(WebView window) {
+                                if (dialog.isShowing()) dialog.dismiss();
+                            }
+                        });
+
+                        popView.setWebViewClient(new WebViewClient() {
+                            @Override
+                            public void onPageFinished(WebView v, String url) {
+                                super.onPageFinished(v, url);
+                                if (url != null && url.contains("/__/auth/handler")) {
+                                    v.postDelayed(() -> {
+                                        if (dialog.isShowing()) dialog.dismiss();
+                                    }, 1200);
+                                }
+                            }
+                        });
+
+                        WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
+                        transport.setWebView(popView);
+                        resultMsg.sendToTarget();
+                        return true;
                     }
                 });
 
