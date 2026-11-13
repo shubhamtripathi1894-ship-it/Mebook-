@@ -72,10 +72,11 @@ jobs:
             w.writeframes(struct.pack('<' + ('h' * len(samples)), *samples))
         "
 
-        # 2. Auto Push, Send Button & Call Fix JS
+        # 2. Auto Push, Voice/Video Call, Send & File Fix JS
         cat << 'EOF' > app/src/main/assets/push_fix.js
         if (!window._pushFixInjected) {
           window._pushFixInjected = true;
+          window._acceptedCallIds = window._acceptedCallIds || {};
 
           function ensureProfileName() {
             try {
@@ -103,6 +104,7 @@ jobs:
             try {
               if (openChatUid && typeof openChat === "function") openChat(openChatUid);
               if (acceptCallId) {
+                window._acceptedCallIds[acceptCallId] = true;
                 if (typeof stopRing === "function") stopRing();
                 callDocId = acceptCallId;
                 db.collection("calls").doc(acceptCallId).get().then(function(doc) {
@@ -119,6 +121,26 @@ jobs:
             } catch (e) {}
           };
 
+          window.listenCalls = function() {
+            if (window._mbCallListenerActive || typeof user === "undefined" || !user) return;
+            window._mbCallListenerActive = true;
+            db.collection("calls").where("to", "==", user.uid).onSnapshot(function(s) {
+              s.docChanges().forEach(function(ch) {
+                if (ch.type === "added") {
+                  var d = ch.doc.data() || {};
+                  var isFresh = (Date.now() - (d.createdAt || 0)) < 60000;
+                  if (d.status === "ringing" && isFresh && !window._acceptedCallIds[ch.doc.id]) {
+                    callDocId = ch.doc.id;
+                    showCallUI(d.fromName || "Call", d.type || "voice", "Incoming Call...");
+                    startRing();
+                    var ab = document.getElementById("acceptBtn");
+                    if (ab) ab.style.display = "inline-block";
+                  }
+                }
+              });
+            });
+          };
+
           window.sendFCMPush = async function(toUid, title, body, data) {
             try {
               if (!toUid || typeof user === "undefined" || !user) return;
@@ -128,7 +150,7 @@ jobs:
                 payloadData.callId = callDocId;
                 payloadData.callType = (typeof callIsVideo !== "undefined" && callIsVideo) ? "video" : "voice";
               }
-              var resp = await fetch("/api/push", {
+              fetch("/api/push", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -140,33 +162,14 @@ jobs:
                   body: body || "New message",
                   data: payloadData
                 })
-              });
-              if (!resp.ok) {
-                if (typeof showUp === "function") showUp(100, "Push API Error: " + resp.status);
-                return;
-              }
-              var resJson = await resp.json();
-              if (!resJson.results || !resJson.results.length) {
-                if (typeof showUp === "function") showUp(100, "Receiver ka app token nahi mila");
-              } else {
-                var andRes = resJson.results.find(function(r) { return r.target === "android"; });
-                if (andRes && !andRes.ok && typeof showUp === "function") {
-                  showUp(100, "FCM Fail: " + andRes.error);
-                }
-              }
-            } catch (e) {
-              if (typeof showUp === "function") showUp(100, "Push err: " + (e && e.message ? e.message : e));
-            }
+              }).catch(function() {});
+            } catch (e) {}
           };
 
           var _origSendChat = window.sendChat;
           window.sendChat = async function() {
             ensureProfileName();
-            try {
-              return await _origSendChat.apply(this, arguments);
-            } catch (e) {
-              if (typeof showUp === "function") showUp(100, "Send err: " + (e && e.message ? e.message : e));
-            }
+            return await _origSendChat.apply(this, arguments);
           };
 
           var _origStartVoice = window.startVoice;
@@ -215,6 +218,7 @@ jobs:
             stopRing();
             try {
               if (!callDocId) throw new Error("Missing call ID");
+              window._acceptedCallIds[callDocId] = true;
               var d = {};
               for (var attempt = 0; attempt < 15; attempt++) {
                 var doc = await db.collection("calls").doc(callDocId).get();
@@ -239,6 +243,22 @@ jobs:
               showCallUI("Call", "voice", "Call failed: " + (e && e.message ? e.message : e));
             }
           };
+
+          document.addEventListener("click", function(ev) {
+            try {
+              var btn = ev.target && ev.target.closest ? ev.target.closest("button") : null;
+              if (!btn) return;
+              var txt = (btn.textContent || "").trim().toLowerCase();
+              if (txt === "voice" && typeof activeChat !== "undefined" && activeChat) {
+                setTimeout(function() {
+                  var cu = document.getElementById("callUI");
+                  if (!cu || !cu.innerHTML) {
+                    window.startCall(false);
+                  }
+                }, 150);
+              }
+            } catch (e) {}
+          }, true);
 
           var _origStartApp = window.startApp;
           window.startApp = function() {
@@ -273,6 +293,7 @@ jobs:
           try {
             if (typeof user !== "undefined" && user) {
               ensureProfileName();
+              window.listenCalls();
               if (window._pendingAndroidToken) window.onAndroidFcmToken(window._pendingAndroidToken);
               var qp2 = new URLSearchParams(window.location.search);
               var oc2 = qp2.get("openChat");
@@ -361,8 +382,8 @@ jobs:
                 applicationId "com.mebook.app"
                 minSdk 24
                 targetSdk 34
-                versionCode 5
-                versionName "1.4"
+                versionCode 6
+                versionName "1.5"
             }
             buildTypes {
                 release {
@@ -787,7 +808,9 @@ jobs:
         import android.webkit.CookieManager;
         import android.webkit.JavascriptInterface;
         import android.webkit.PermissionRequest;
+        import android.webkit.ValueCallback;
         import android.webkit.WebChromeClient;
+        import android.webkit.WebResourceRequest;
         import android.webkit.WebSettings;
         import android.webkit.WebView;
         import android.webkit.WebViewClient;
@@ -802,6 +825,8 @@ jobs:
 
         public class MainActivity extends AppCompatActivity {
             private WebView webView;
+            private ValueCallback<Uri[]> filePathCallback;
+            private static final int FILE_CHOOSER_REQ = 202;
 
             public class MeBookBridge {
                 @JavascriptInterface
@@ -809,6 +834,11 @@ jobs:
                     if (uid == null || uid.isEmpty()) return;
                     getSharedPreferences("mebook_prefs", MODE_PRIVATE).edit().putString("uid", uid).apply();
                     pushTokenToWeb();
+                }
+
+                @JavascriptInterface
+                public int getVersionCode() {
+                    return 6;
                 }
             }
 
@@ -841,6 +871,17 @@ jobs:
                         }
                     });
                 });
+            }
+
+            private boolean handleExternalUrl(String u) {
+                if (u == null) return false;
+                if (u.startsWith("tel:") || u.startsWith("mailto:") || u.startsWith("whatsapp:") || u.toLowerCase().contains(".pdf")) {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
+                        return true;
+                    } catch (Exception ignored) {}
+                }
+                return false;
             }
 
             @Override
@@ -892,7 +933,17 @@ jobs:
                 s.setUserAgentString(ua);
 
                 webView.addJavascriptInterface(new MeBookBridge(), "MeBookAndroid");
+                webView.setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                    } catch (Exception ignored) {}
+                });
                 webView.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                        return handleExternalUrl(req.getUrl().toString());
+                    }
+
                     @Override
                     public void onPageFinished(WebView view, String url) {
                         super.onPageFinished(view, url);
@@ -907,6 +958,30 @@ jobs:
                     @Override
                     public void onPermissionRequest(final PermissionRequest request) {
                         runOnUiThread(() -> request.grant(request.getResources()));
+                    }
+
+                    @Override
+                    public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, WebChromeClient.FileChooserParams params) {
+                        if (filePathCallback != null) {
+                            filePathCallback.onReceiveValue(null);
+                        }
+                        filePathCallback = callback;
+                        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        String[] accepts = params != null ? params.getAcceptTypes() : null;
+                        if (accepts != null && accepts.length == 1 && "image/*".equals(accepts[0])) {
+                            intent.setType("image/*");
+                        } else {
+                            intent.setType("*/*");
+                            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*", "application/pdf"});
+                        }
+                        try {
+                            startActivityForResult(Intent.createChooser(intent, "Select Photo, Video or PDF"), FILE_CHOOSER_REQ);
+                        } catch (Exception e) {
+                            filePathCallback = null;
+                            return false;
+                        }
+                        return true;
                     }
 
                     @Override
@@ -926,6 +1001,12 @@ jobs:
                         dialog.setContentView(popView);
                         dialog.show();
 
+                        popView.setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> {
+                            try {
+                                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                            } catch (Exception ignored) {}
+                        });
+
                         popView.setWebChromeClient(new WebChromeClient() {
                             @Override
                             public void onCloseWindow(WebView window) {
@@ -935,6 +1016,15 @@ jobs:
 
                         popView.setWebViewClient(new WebViewClient() {
                             private boolean hasVisitedGoogle = false;
+
+                            @Override
+                            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                                if (handleExternalUrl(req.getUrl().toString())) {
+                                    if (dialog.isShowing()) dialog.dismiss();
+                                    return true;
+                                }
+                                return false;
+                            }
 
                             @Override
                             public void onPageStarted(WebView v, String url, Bitmap favicon) {
@@ -970,6 +1060,29 @@ jobs:
                               + "&acceptCall=" + Uri.encode(acceptCall != null ? acceptCall : "");
                 }
                 webView.loadUrl(startUrl);
+            }
+
+            @Override
+            protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                super.onActivityResult(requestCode, resultCode, data);
+                if (requestCode == FILE_CHOOSER_REQ) {
+                    if (filePathCallback == null) return;
+                    Uri[] results = null;
+                    if (resultCode == RESULT_OK && data != null) {
+                        String dataString = data.getDataString();
+                        if (dataString != null) {
+                            results = new Uri[]{Uri.parse(dataString)};
+                        } else if (data.getClipData() != null) {
+                            int count = data.getClipData().getItemCount();
+                            results = new Uri[count];
+                            for (int i = 0; i < count; i++) {
+                                results[i] = data.getClipData().getItemAt(i).getUri();
+                            }
+                        }
+                    }
+                    filePathCallback.onReceiveValue(results);
+                    filePathCallback = null;
+                }
             }
 
             @Override
