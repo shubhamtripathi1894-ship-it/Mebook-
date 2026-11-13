@@ -136,14 +136,18 @@ jobs:
 
           window.startCall = async function(isVideo) {
             try {
+              if (!activeChat) throw new Error("No chat selected");
               var chatUser = users.find(function(u) { return u.uid === activeChat; });
-              var nm = chatUser ? chatUser.firstName : "Chat";
-              callIsVideo = isVideo;
+              var nm = (chatUser && chatUser.firstName) ? chatUser.firstName : "Chat";
+              var myName = (typeof profile !== "undefined" && profile && (profile.firstName || profile.name))
+                ? (profile.firstName || profile.name)
+                : ((typeof user !== "undefined" && user && user.displayName) ? user.displayName : "MeBook");
+              callIsVideo = !!isVideo;
               showCallUI(nm, isVideo ? "video" : "voice", "Calling...");
               startRing();
               var ref = await db.collection("calls").add({
                 from: user.uid,
-                fromName: profile ? profile.firstName : "MeBook",
+                fromName: String(myName || "MeBook"),
                 to: activeChat,
                 type: isVideo ? "video" : "voice",
                 offer: "",
@@ -156,8 +160,8 @@ jobs:
               listenCallDoc();
               window.sendFCMPush(
                 activeChat,
-                profile ? profile.firstName : "MeBook",
-                (profile ? profile.firstName : "Someone") + " is calling...",
+                String(myName || "MeBook"),
+                String(myName || "Someone") + " is calling...",
                 { type: "call", callId: callDocId, callType: isVideo ? "video" : "voice" }
               );
             } catch (e) {
@@ -168,6 +172,7 @@ jobs:
           window.acceptCall = async function() {
             stopRing();
             try {
+              if (!callDocId) throw new Error("Missing call ID");
               var d = {};
               for (var attempt = 0; attempt < 15; attempt++) {
                 var doc = await db.collection("calls").doc(callDocId).get();
@@ -312,8 +317,8 @@ jobs:
                 applicationId "com.mebook.app"
                 minSdk 24
                 targetSdk 34
-                versionCode 3
-                versionName "1.2"
+                versionCode 4
+                versionName "1.3"
             }
             buildTypes {
                 release {
