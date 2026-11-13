@@ -72,19 +72,29 @@ jobs:
             w.writeframes(struct.pack('<' + ('h' * len(samples)), *samples))
         "
 
-        # 2. Auto Push & Call Timing Fix JS
+        # 2. Auto Push, Send Button & Call Fix JS
         cat << 'EOF' > app/src/main/assets/push_fix.js
         if (!window._pushFixInjected) {
           window._pushFixInjected = true;
+
+          function ensureProfileName() {
+            try {
+              if (typeof profile !== "undefined" && profile && !profile.firstName) {
+                profile.firstName = profile.name || (typeof user !== "undefined" && user && user.displayName) || "MeBook";
+              }
+            } catch (e) {}
+          }
 
           window.onAndroidFcmToken = function(token) {
             window._pendingAndroidToken = token;
             try {
               if (token && typeof user !== "undefined" && user && typeof db !== "undefined") {
-                db.collection("users").doc(user.uid).set({
-                  androidFcmToken: token,
-                  androidFcmUpdated: Date.now()
-                }, { merge: true });
+                if (typeof profile !== "undefined" && profile && profile.uid === user.uid) {
+                  db.collection("users").doc(user.uid).update({
+                    androidFcmToken: token,
+                    androidFcmUpdated: Date.now()
+                  }).catch(function() {});
+                }
               }
             } catch (e) {}
           };
@@ -118,7 +128,7 @@ jobs:
                 payloadData.callId = callDocId;
                 payloadData.callType = (typeof callIsVideo !== "undefined" && callIsVideo) ? "video" : "voice";
               }
-              fetch("/api/push", {
+              var resp = await fetch("/api/push", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -130,11 +140,43 @@ jobs:
                   body: body || "New message",
                   data: payloadData
                 })
-              }).catch(function() {});
-            } catch (e) {}
+              });
+              if (!resp.ok) {
+                if (typeof showUp === "function") showUp(100, "Push API Error: " + resp.status);
+                return;
+              }
+              var resJson = await resp.json();
+              if (!resJson.results || !resJson.results.length) {
+                if (typeof showUp === "function") showUp(100, "Receiver ka app token nahi mila");
+              } else {
+                var andRes = resJson.results.find(function(r) { return r.target === "android"; });
+                if (andRes && !andRes.ok && typeof showUp === "function") {
+                  showUp(100, "FCM Fail: " + andRes.error);
+                }
+              }
+            } catch (e) {
+              if (typeof showUp === "function") showUp(100, "Push err: " + (e && e.message ? e.message : e));
+            }
+          };
+
+          var _origSendChat = window.sendChat;
+          window.sendChat = async function() {
+            ensureProfileName();
+            try {
+              return await _origSendChat.apply(this, arguments);
+            } catch (e) {
+              if (typeof showUp === "function") showUp(100, "Send err: " + (e && e.message ? e.message : e));
+            }
+          };
+
+          var _origStartVoice = window.startVoice;
+          window.startVoice = async function() {
+            ensureProfileName();
+            return await _origStartVoice.apply(this, arguments);
           };
 
           window.startCall = async function(isVideo) {
+            ensureProfileName();
             try {
               if (!activeChat) throw new Error("No chat selected");
               var chatUser = users.find(function(u) { return u.uid === activeChat; });
@@ -200,6 +242,7 @@ jobs:
 
           var _origStartApp = window.startApp;
           window.startApp = function() {
+            ensureProfileName();
             if (_origStartApp) _origStartApp();
             if (window._pendingAndroidToken) window.onAndroidFcmToken(window._pendingAndroidToken);
             try {
@@ -229,6 +272,7 @@ jobs:
 
           try {
             if (typeof user !== "undefined" && user) {
+              ensureProfileName();
               if (window._pendingAndroidToken) window.onAndroidFcmToken(window._pendingAndroidToken);
               var qp2 = new URLSearchParams(window.location.search);
               var oc2 = qp2.get("openChat");
@@ -317,8 +361,8 @@ jobs:
                 applicationId "com.mebook.app"
                 minSdk 24
                 targetSdk 34
-                versionCode 4
-                versionName "1.3"
+                versionCode 5
+                versionName "1.4"
             }
             buildTypes {
                 release {
