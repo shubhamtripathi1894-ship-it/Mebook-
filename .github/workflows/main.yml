@@ -36,22 +36,23 @@ jobs:
         mkdir -p app/src/main/res/drawable
         mkdir -p app/src/main/res/raw
         mkdir -p app/src/main/res/mipmap-anydpi-v26
+        mkdir -p app/src/main/assets
 
         if [ -f "google-services.json" ]; then
           cp google-services.json app/google-services.json
         fi
 
-        # 1. Generate Melodious Soft Chime Ringtone (Sweet Flute/Harp Chimes)
+        # 1. Generate Melodious Soft Chime Ringtone
         python3 -c "
         import math, struct, wave
         rate = 44100
         dur = 3.2
         samples = []
         notes = [
-            (0.0, 0.7, 659.25),   # E5 (Soft Flute Bell)
-            (0.3, 0.7, 830.61),   # G#5
-            (0.6, 0.8, 987.77),   # B5
-            (1.0, 1.4, 1318.51)   # E6 (Sweet High Chime)
+            (0.0, 0.7, 659.25),
+            (0.3, 0.7, 830.61),
+            (0.6, 0.8, 987.77),
+            (1.0, 1.4, 1318.51)
         ]
         for i in range(int(rate * dur)):
             t = i / rate
@@ -71,7 +72,110 @@ jobs:
             w.writeframes(struct.pack('<' + ('h' * len(samples)), *samples))
         "
 
-        # 2. App Icon Background (Golden Yellow)
+        # 2. Auto Push Fix JS (index.html ko edit kiye bina chalega)
+        cat << 'EOF' > app/src/main/assets/push_fix.js
+        if (!window._pushFixInjected) {
+          window._pushFixInjected = true;
+
+          window.onAndroidFcmToken = function(token) {
+            window._pendingAndroidToken = token;
+            try {
+              if (token && typeof user !== "undefined" && user && typeof db !== "undefined") {
+                db.collection("users").doc(user.uid).set({
+                  androidFcmToken: token,
+                  androidFcmUpdated: Date.now()
+                }, { merge: true });
+              }
+            } catch (e) {}
+          };
+
+          window.handleNativeAction = function(openChatUid, acceptCallId) {
+            try {
+              if (openChatUid && typeof openChat === "function") openChat(openChatUid);
+              if (acceptCallId) {
+                if (typeof stopRing === "function") stopRing();
+                callDocId = acceptCallId;
+                db.collection("calls").doc(acceptCallId).get().then(function(doc) {
+                  var d = doc.data() || {};
+                  if (d.status === "ringing") {
+                    showCallUI(d.fromName || "Call", d.type || "voice", "Connecting...");
+                    acceptCall();
+                  }
+                });
+              }
+            } catch (e) {}
+          };
+
+          window.sendFCMPush = async function(toUid, title, body, data) {
+            try {
+              if (!toUid || typeof user === "undefined" || !user) return;
+              var idToken = await user.getIdToken();
+              var payloadData = Object.assign({}, data || {});
+              if (payloadData.type === "call" && !payloadData.callId && typeof callDocId !== "undefined" && callDocId) {
+                payloadData.callId = callDocId;
+                payloadData.callType = (typeof callIsVideo !== "undefined" && callIsVideo) ? "video" : "voice";
+              }
+              fetch("/api/push", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": "Bearer " + idToken
+                },
+                body: JSON.stringify({
+                  toUid: toUid,
+                  title: title || "MeBook",
+                  body: body || "New message",
+                  data: payloadData
+                })
+              }).catch(function() {});
+            } catch (e) {}
+          };
+
+          var _origStartApp = window.startApp;
+          window.startApp = function() {
+            if (_origStartApp) _origStartApp();
+            if (window._pendingAndroidToken) window.onAndroidFcmToken(window._pendingAndroidToken);
+            try {
+              var qp = new URLSearchParams(window.location.search);
+              var oc = qp.get("openChat");
+              var ac = qp.get("acceptCall");
+              if (oc || ac) {
+                window.history.replaceState({}, "", "/");
+                setTimeout(function() { window.handleNativeAction(oc, ac); }, 500);
+              }
+            } catch (e) {}
+          };
+
+          var _origEndCall = window.endCall;
+          window.endCall = async function() {
+            var cid = (typeof callDocId !== "undefined") ? callDocId : null;
+            if (_origEndCall) await _origEndCall();
+            if (cid && typeof user !== "undefined" && user) {
+              try {
+                var snap = await db.collection("calls").doc(cid).get();
+                var cd = snap.data() || {};
+                var other = (cd.from === user.uid) ? cd.to : cd.from;
+                if (other) window.sendFCMPush(other, "Call Ended", "", { type: "cancel_call", callId: cid });
+              } catch (e) {}
+            }
+          };
+
+          try {
+            if (typeof user !== "undefined" && user) {
+              if (window._pendingAndroidToken) window.onAndroidFcmToken(window._pendingAndroidToken);
+              var qp2 = new URLSearchParams(window.location.search);
+              var oc2 = qp2.get("openChat");
+              var ac2 = qp2.get("acceptCall");
+              if (oc2 || ac2) {
+                window.history.replaceState({}, "", "/");
+                setTimeout(function() { window.handleNativeAction(oc2, ac2); }, 500);
+              }
+            }
+          } catch (e) {}
+        }
+        EOF
+
+        # 3. App Icon Background
         cat << 'EOF' > app/src/main/res/drawable/ic_launcher_background.xml
         <vector xmlns:android="http://schemas.android.com/apk/res/android"
             android:width="108dp"
@@ -82,7 +186,7 @@ jobs:
         </vector>
         EOF
 
-        # 3. App Icon Foreground (Bold MeBook 'M')
+        # 4. App Icon Foreground
         cat << 'EOF' > app/src/main/res/drawable/ic_launcher_foreground.xml
         <vector xmlns:android="http://schemas.android.com/apk/res/android"
             android:width="108dp"
@@ -94,7 +198,7 @@ jobs:
         </vector>
         EOF
 
-        # 4. Adaptive Icon for Android 8 to 15
+        # 5. Adaptive Icon
         cat << 'EOF' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
         <?xml version="1.0" encoding="utf-8"?>
         <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -104,14 +208,14 @@ jobs:
         EOF
         cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
 
-        # 5. gradle.properties
+        # 6. gradle.properties
         cat << 'EOF' > gradle.properties
         android.useAndroidX=true
         android.enableJetifier=true
         org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
         EOF
 
-        # 6. Root build.gradle
+        # 7. Root build.gradle
         cat << 'EOF' > build.gradle
         buildscript {
             repositories { google(); mavenCentral() }
@@ -123,17 +227,17 @@ jobs:
         allprojects { repositories { google(); mavenCentral() } }
         EOF
 
-        # 7. settings.gradle
+        # 8. settings.gradle
         echo "include ':app'" > settings.gradle
 
-        # 8. strings.xml
+        # 9. strings.xml
         cat << 'EOF' > app/src/main/res/values/strings.xml
         <resources>
             <string name="app_name">MeBook</string>
         </resources>
         EOF
 
-        # 9. app/build.gradle
+        # 10. app/build.gradle
         cat << 'EOF' > app/build.gradle
         plugins {
             id 'com.android.application'
@@ -146,8 +250,8 @@ jobs:
                 applicationId "com.mebook.app"
                 minSdk 24
                 targetSdk 34
-                versionCode 1
-                versionName "1.0"
+                versionCode 2
+                versionName "1.1"
             }
             buildTypes {
                 release {
@@ -161,6 +265,7 @@ jobs:
             }
         }
         dependencies {
+            implementation 'androidx.core:core:1.12.0'
             implementation 'androidx.appcompat:appcompat:1.6.1'
             implementation 'com.google.android.material:material:1.11.0'
             implementation platform('com.google.firebase:firebase-bom:32.7.4')
@@ -168,7 +273,7 @@ jobs:
         }
         EOF
 
-        # 10. AndroidManifest.xml (With Icon & Ringtone permissions)
+        # 11. AndroidManifest.xml
         cat << 'EOF' > app/src/main/AndroidManifest.xml
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.mebook.app">
@@ -189,7 +294,11 @@ jobs:
                 android:theme="@style/Theme.AppCompat.NoActionBar"
                 android:usesCleartextTraffic="true">
 
-                <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden">
+                <activity
+                    android:name=".MainActivity"
+                    android:exported="true"
+                    android:launchMode="singleTop"
+                    android:configChanges="orientation|screenSize|keyboardHidden">
                     <intent-filter>
                         <action android:name="android.intent.action.MAIN" />
                         <category android:name="android.intent.category.LAUNCHER" />
@@ -199,6 +308,8 @@ jobs:
                 <activity
                     android:name=".CallActivity"
                     android:exported="true"
+                    android:launchMode="singleTop"
+                    android:excludeFromRecents="true"
                     android:showWhenLocked="true"
                     android:turnScreenOn="true"
                     android:theme="@style/Theme.AppCompat.NoActionBar" />
@@ -212,12 +323,16 @@ jobs:
         </manifest>
         EOF
 
-        # 11. CallActivity.java (Plays Sweet Custom Ringtone)
+        # 12. CallActivity.java
         cat << 'EOF' > app/src/main/java/com/mebook/app/CallActivity.java
         package com.mebook.app;
         import android.app.KeyguardManager;
+        import android.app.NotificationManager;
+        import android.content.BroadcastReceiver;
         import android.content.Context;
         import android.content.Intent;
+        import android.content.IntentFilter;
+        import android.content.SharedPreferences;
         import android.media.AudioAttributes;
         import android.media.MediaPlayer;
         import android.media.RingtoneManager;
@@ -225,13 +340,26 @@ jobs:
         import android.os.Bundle;
         import android.os.Vibrator;
         import android.view.WindowManager;
-        import android.widget.Button;
         import android.widget.TextView;
         import androidx.appcompat.app.AppCompatActivity;
+        import androidx.core.content.ContextCompat;
+        import org.json.JSONObject;
+        import java.io.OutputStream;
+        import java.net.HttpURLConnection;
+        import java.net.URL;
 
         public class CallActivity extends AppCompatActivity {
             private MediaPlayer player;
             private Vibrator vibrator;
+            private String callId = "";
+            private String fromUid = "";
+            private final BroadcastReceiver closeReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    stopRingtone();
+                    finish();
+                }
+            };
 
             @Override
             protected void onCreate(Bundle savedInstanceState) {
@@ -241,53 +369,109 @@ jobs:
                     setTurnScreenOn(true);
                     KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
                     if (km != null) km.requestDismissKeyguard(this, null);
-                } else {
-                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                        WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
-                        WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
                 }
+                getWindow().addFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                );
                 setContentView(R.layout.activity_call);
 
                 String name = getIntent().getStringExtra("caller");
-                ((TextView) findViewById(R.id.callerName)).setText(name != null ? name : "Someone");
+                callId = getIntent().getStringExtra("callId");
+                fromUid = getIntent().getStringExtra("fromUid");
+                String callType = getIntent().getStringExtra("callType");
 
-                // Sweet Melodious Ringtone + Gentle Vibration
+                ((TextView) findViewById(R.id.callerName)).setText(name != null ? name : "Someone");
+                TextView sub = findViewById(R.id.callSubTitle);
+                if (sub != null && "video".equalsIgnoreCase(callType)) {
+                    sub.setText("MeBook Incoming Video Call...");
+                }
+
+                ContextCompat.registerReceiver(
+                    this,
+                    closeReceiver,
+                    new IntentFilter("com.mebook.app.CLOSE_CALL"),
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                );
+
                 try {
                     player = MediaPlayer.create(this, R.raw.mebook_ringtone);
                     if (player == null) {
                         player = MediaPlayer.create(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE));
                     }
-                    player.setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build());
-                    player.setLooping(true);
-                    player.start();
-
+                    if (player != null) {
+                        player.setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build());
+                        player.setLooping(true);
+                        player.start();
+                    }
                     vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
                     if (vibrator != null) vibrator.vibrate(new long[]{0, 800, 1200}, 0);
                 } catch (Exception ignored) {}
 
-                findViewById(R.id.btnDecline).setOnClickListener(v -> finish());
+                findViewById(R.id.btnDecline).setOnClickListener(v -> {
+                    stopRingtone();
+                    sendDeclineToServer();
+                    finish();
+                });
+
                 findViewById(R.id.btnAccept).setOnClickListener(v -> {
+                    stopRingtone();
                     Intent i = new Intent(this, MainActivity.class);
-                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    i.putExtra("openChat", fromUid != null ? fromUid : "");
+                    i.putExtra("acceptCall", callId != null ? callId : "");
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
                     startActivity(i);
                     finish();
                 });
             }
 
+            private void sendDeclineToServer() {
+                if (callId == null || callId.isEmpty()) return;
+                SharedPreferences sp = getSharedPreferences("mebook_prefs", MODE_PRIVATE);
+                String uid = sp.getString("uid", "");
+                if (uid.isEmpty()) return;
+                new Thread(() -> {
+                    try {
+                        URL url = new URL("https://mebook-rho.vercel.app/api/push");
+                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                        conn.setRequestMethod("POST");
+                        conn.setRequestProperty("Content-Type", "application/json");
+                        conn.setDoOutput(true);
+                        JSONObject body = new JSONObject();
+                        body.put("action", "decline");
+                        body.put("callId", callId);
+                        body.put("uid", uid);
+                        OutputStream os = conn.getOutputStream();
+                        os.write(body.toString().getBytes("UTF-8"));
+                        os.close();
+                        conn.getResponseCode();
+                        conn.disconnect();
+                    } catch (Exception ignored) {}
+                }).start();
+            }
+
+            private void stopRingtone() {
+                NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null) nm.cancel(1001);
+                if (player != null) { try { player.stop(); player.release(); } catch(Exception ignored){} player = null; }
+                if (vibrator != null) { try { vibrator.cancel(); } catch(Exception ignored){} }
+            }
+
             @Override
             protected void onDestroy() {
                 super.onDestroy();
-                if (player != null) { try { player.stop(); player.release(); } catch(Exception ignored){} }
-                if (vibrator != null) vibrator.cancel();
+                try { unregisterReceiver(closeReceiver); } catch (Exception ignored) {}
+                stopRingtone();
             }
         }
         EOF
 
-        # 12. Call Screen UI Layout
+        # 13. Call Screen UI Layout
         cat << 'EOF' > app/src/main/res/layout/activity_call.xml
         <?xml version="1.0" encoding="utf-8"?>
         <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -296,6 +480,7 @@ jobs:
             android:background="#0D0A04"
             android:padding="24dp">
             <TextView
+                android:id="@+id/callSubTitle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_centerHorizontal="true"
@@ -341,7 +526,7 @@ jobs:
         </RelativeLayout>
         EOF
 
-        # 13. MyFCMService.java
+        # 14. MyFCMService.java
         cat << 'EOF' > app/src/main/java/com/mebook/app/MyFCMService.java
         package com.mebook.app;
         import android.app.NotificationChannel;
@@ -354,54 +539,124 @@ jobs:
         import androidx.core.app.NotificationCompat;
         import com.google.firebase.messaging.FirebaseMessagingService;
         import com.google.firebase.messaging.RemoteMessage;
+        import java.util.Map;
 
         public class MyFCMService extends FirebaseMessagingService {
             @Override
+            public void onNewToken(String token) {
+                super.onNewToken(token);
+                getSharedPreferences("mebook_prefs", MODE_PRIVATE)
+                    .edit().putString("fcm_token", token).apply();
+            }
+
+            @Override
             public void onMessageReceived(RemoteMessage message) {
-                String type = message.getData().get("type");
-                String title = message.getData().get("title");
-                if (title == null) title = "MeBook";
+                Map<String, String> data = message.getData();
+                String type = data.get("type");
+                String title = data.get("title");
+                String body = data.get("body");
+                String fromUid = data.get("fromUid");
+                String callId = data.get("callId");
+                String callType = data.get("callType");
+
+                if (title == null || title.isEmpty()) title = "MeBook";
+                NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+
+                if ("cancel_call".equalsIgnoreCase(type)) {
+                    if (nm != null) nm.cancel(1001);
+                    Intent close = new Intent("com.mebook.app.CLOSE_CALL");
+                    close.setPackage(getPackageName());
+                    sendBroadcast(close);
+                    return;
+                }
 
                 if ("call".equalsIgnoreCase(type)) {
                     Intent intent = new Intent(this, CallActivity.class);
                     intent.putExtra("caller", title);
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    PendingIntent pi = PendingIntent.getActivity(this, 1, intent, PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0));
+                    intent.putExtra("callId", callId != null ? callId : "");
+                    intent.putExtra("fromUid", fromUid != null ? fromUid : "");
+                    intent.putExtra("callType", callType != null ? callType : "voice");
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
 
-                    NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                    PendingIntent pi = PendingIntent.getActivity(
+                        this, 1001, intent,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                    );
+
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        NotificationChannel ch = new NotificationChannel("call_ch", "Calls", NotificationManager.IMPORTANCE_HIGH);
-                        ch.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE), null);
+                        NotificationChannel ch = new NotificationChannel("call_ch_v2", "Incoming Calls", NotificationManager.IMPORTANCE_HIGH);
+                        ch.setSound(null, null);
+                        ch.enableVibration(true);
                         if (nm != null) nm.createNotificationChannel(ch);
                     }
-                    NotificationCompat.Builder b = new NotificationCompat.Builder(this, "call_ch")
+
+                    NotificationCompat.Builder b = new NotificationCompat.Builder(this, "call_ch_v2")
                         .setSmallIcon(android.R.drawable.ic_menu_call)
                         .setContentTitle("Incoming MeBook Call")
                         .setContentText(title + " is calling...")
                         .setPriority(NotificationCompat.PRIORITY_MAX)
                         .setCategory(NotificationCompat.CATEGORY_CALL)
+                        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                        .setOngoing(true)
                         .setFullScreenIntent(pi, true)
+                        .setContentIntent(pi)
                         .setAutoCancel(true);
 
-                    if (nm != null) nm.notify(1, b.build());
-                    try { startActivity(intent); } catch(Exception ignored){}
+                    if (nm != null) nm.notify(1001, b.build());
+                    try { startActivity(intent); } catch (Exception ignored) {}
+                    return;
                 }
+
+                Intent openIntent = new Intent(this, MainActivity.class);
+                openIntent.putExtra("openChat", fromUid != null ? fromUid : "");
+                openIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+
+                int notifId = (int) (System.currentTimeMillis() % 100000);
+                PendingIntent openPi = PendingIntent.getActivity(
+                    this, notifId, openIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                );
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    NotificationChannel ch = new NotificationChannel("chat_ch_v1", "Messages", NotificationManager.IMPORTANCE_HIGH);
+                    ch.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION), null);
+                    ch.enableVibration(true);
+                    if (nm != null) nm.createNotificationChannel(ch);
+                }
+
+                NotificationCompat.Builder chatBuilder = new NotificationCompat.Builder(this, "chat_ch_v1")
+                    .setSmallIcon(android.R.drawable.sym_action_chat)
+                    .setContentTitle(title)
+                    .setContentText(body != null && !body.isEmpty() ? body : "New message")
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                    .setAutoCancel(true)
+                    .setContentIntent(openPi);
+
+                if (nm != null) nm.notify(notifId, chatBuilder.build());
             }
         }
         EOF
 
-        # 14. MainActivity.java
+        # 15. MainActivity.java
         cat << 'EOF' > app/src/main/java/com/mebook/app/MainActivity.java
         package com.mebook.app;
         import android.Manifest;
         import android.app.Dialog;
+        import android.app.NotificationManager;
+        import android.content.Context;
+        import android.content.Intent;
+        import android.content.SharedPreferences;
         import android.content.pm.PackageManager;
         import android.graphics.Bitmap;
         import android.graphics.Color;
+        import android.net.Uri;
         import android.os.Build;
         import android.os.Bundle;
         import android.os.Message;
+        import android.provider.Settings;
         import android.webkit.CookieManager;
+        import android.webkit.JavascriptInterface;
         import android.webkit.PermissionRequest;
         import android.webkit.WebChromeClient;
         import android.webkit.WebSettings;
@@ -410,9 +665,52 @@ jobs:
         import androidx.appcompat.app.AppCompatActivity;
         import androidx.core.app.ActivityCompat;
         import androidx.core.content.ContextCompat;
+        import com.google.firebase.messaging.FirebaseMessaging;
+        import java.io.ByteArrayOutputStream;
+        import java.io.InputStream;
 
         public class MainActivity extends AppCompatActivity {
             private WebView webView;
+
+            public class MeBookBridge {
+                @JavascriptInterface
+                public void setCurrentUserUid(String uid) {
+                    if (uid == null || uid.isEmpty()) return;
+                    getSharedPreferences("mebook_prefs", MODE_PRIVATE).edit().putString("uid", uid).apply();
+                    pushTokenToWeb();
+                }
+            }
+
+            private void injectPushFix() {
+                try {
+                    InputStream is = getAssets().open("push_fix.js");
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[1024];
+                    int len;
+                    while ((len = is.read(buffer)) != -1) {
+                        baos.write(buffer, 0, len);
+                    }
+                    is.close();
+                    String js = baos.toString("UTF-8");
+                    runOnUiThread(() -> {
+                        if (webView != null) webView.evaluateJavascript(js, null);
+                    });
+                } catch (Exception ignored) {}
+            }
+
+            private void pushTokenToWeb() {
+                FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
+                    if (!task.isSuccessful()) return;
+                    String token = task.getResult();
+                    if (token == null || token.isEmpty()) return;
+                    getSharedPreferences("mebook_prefs", MODE_PRIVATE).edit().putString("fcm_token", token).apply();
+                    runOnUiThread(() -> {
+                        if (webView != null) {
+                            webView.evaluateJavascript("if(window.onAndroidFcmToken){window.onAndroidFcmToken('" + token + "');}", null);
+                        }
+                    });
+                });
+            }
 
             @Override
             protected void onCreate(Bundle savedInstanceState) {
@@ -428,8 +726,18 @@ jobs:
                     ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA}, 101);
                 }
 
-                webView.setBackgroundColor(Color.parseColor("#0D0A04"));
+                if (Build.VERSION.SDK_INT >= 34) {
+                    SharedPreferences sp = getSharedPreferences("mebook_prefs", MODE_PRIVATE);
+                    NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                    if (nm != null && !nm.canUseFullScreenIntent() && !sp.getBoolean("asked_fsi", false)) {
+                        sp.edit().putBoolean("asked_fsi", true).apply();
+                        try {
+                            startActivity(new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:" + getPackageName())));
+                        } catch (Exception ignored) {}
+                    }
+                }
 
+                webView.setBackgroundColor(Color.parseColor("#0D0A04"));
                 WebSettings s = webView.getSettings();
                 s.setJavaScriptEnabled(true);
                 s.setDomStorageEnabled(true);
@@ -445,7 +753,18 @@ jobs:
                 String ua = s.getUserAgentString().replace("; wv", "");
                 s.setUserAgentString(ua);
 
-                webView.setWebViewClient(new WebViewClient());
+                webView.addJavascriptInterface(new MeBookBridge(), "MeBookAndroid");
+                webView.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public void onPageFinished(WebView view, String url) {
+                        super.onPageFinished(view, url);
+                        if (url != null && url.contains("mebook-rho.vercel.app")) {
+                            injectPushFix();
+                            pushTokenToWeb();
+                        }
+                    }
+                });
+
                 webView.setWebChromeClient(new WebChromeClient() {
                     @Override
                     public void onPermissionRequest(final PermissionRequest request) {
@@ -505,7 +824,27 @@ jobs:
                     }
                 });
 
-                webView.loadUrl("https://mebook-rho.vercel.app/");
+                String startUrl = "https://mebook-rho.vercel.app/";
+                String openChat = getIntent().getStringExtra("openChat");
+                String acceptCall = getIntent().getStringExtra("acceptCall");
+                if ((openChat != null && !openChat.isEmpty()) || (acceptCall != null && !acceptCall.isEmpty())) {
+                    startUrl += "?openChat=" + Uri.encode(openChat != null ? openChat : "")
+                              + "&acceptCall=" + Uri.encode(acceptCall != null ? acceptCall : "");
+                }
+                webView.loadUrl(startUrl);
+            }
+
+            @Override
+            protected void onNewIntent(Intent intent) {
+                super.onNewIntent(intent);
+                setIntent(intent);
+                String openChat = intent.getStringExtra("openChat");
+                String acceptCall = intent.getStringExtra("acceptCall");
+                if (webView != null && ((openChat != null && !openChat.isEmpty()) || (acceptCall != null && !acceptCall.isEmpty()))) {
+                    String oc = openChat != null ? openChat : "";
+                    String ac = acceptCall != null ? acceptCall : "";
+                    webView.evaluateJavascript("if(window.handleNativeAction){window.handleNativeAction('" + oc + "','" + ac + "');}", null);
+                }
             }
 
             @Override
