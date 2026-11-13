@@ -72,7 +72,7 @@ jobs:
             w.writeframes(struct.pack('<' + ('h' * len(samples)), *samples))
         "
 
-        # 2. Auto Push Fix JS (index.html ko edit kiye bina chalega)
+        # 2. Auto Push & Call Timing Fix JS
         cat << 'EOF' > app/src/main/assets/push_fix.js
         if (!window._pushFixInjected) {
           window._pushFixInjected = true;
@@ -99,7 +99,10 @@ jobs:
                   var d = doc.data() || {};
                   if (d.status === "ringing") {
                     showCallUI(d.fromName || "Call", d.type || "voice", "Connecting...");
-                    acceptCall();
+                    window.acceptCall();
+                  } else if (d.status === "ended" || d.status === "declined") {
+                    showCallUI(d.fromName || "Call", d.type || "voice", "Call ended");
+                    setTimeout(hideCallUI, 1200);
                   }
                 });
               }
@@ -129,6 +132,65 @@ jobs:
                 })
               }).catch(function() {});
             } catch (e) {}
+          };
+
+          window.startCall = async function(isVideo) {
+            try {
+              var chatUser = users.find(function(u) { return u.uid === activeChat; });
+              var nm = chatUser ? chatUser.firstName : "Chat";
+              callIsVideo = isVideo;
+              showCallUI(nm, isVideo ? "video" : "voice", "Calling...");
+              startRing();
+              var ref = await db.collection("calls").add({
+                from: user.uid,
+                fromName: profile ? profile.firstName : "MeBook",
+                to: activeChat,
+                type: isVideo ? "video" : "voice",
+                offer: "",
+                status: "ringing",
+                createdAt: Date.now()
+              });
+              callDocId = ref.id;
+              var offerStr = await setupPc(isVideo, null);
+              await db.collection("calls").doc(callDocId).update({ offer: offerStr });
+              listenCallDoc();
+              window.sendFCMPush(
+                activeChat,
+                profile ? profile.firstName : "MeBook",
+                (profile ? profile.firstName : "Someone") + " is calling...",
+                { type: "call", callId: callDocId, callType: isVideo ? "video" : "voice" }
+              );
+            } catch (e) {
+              showCallUI("Call", isVideo ? "video" : "voice", "Call failed: " + (e && e.message ? e.message : e));
+            }
+          };
+
+          window.acceptCall = async function() {
+            stopRing();
+            try {
+              var d = {};
+              for (var attempt = 0; attempt < 15; attempt++) {
+                var doc = await db.collection("calls").doc(callDocId).get();
+                d = doc.data() || {};
+                if (d.status === "ended" || d.status === "declined") {
+                  showCallUI(d.fromName || "Call", d.type || "voice", "Call ended");
+                  setTimeout(hideCallUI, 1200);
+                  return;
+                }
+                if (d.offer) break;
+                await new Promise(function(r) { setTimeout(r, 400); });
+              }
+              if (!d.offer) throw new Error("Offer timeout");
+              callIsVideo = (d.type === "video");
+              var ansStr = await setupPc(callIsVideo, d.offer);
+              await db.collection("calls").doc(callDocId).update({ answer: ansStr, status: "connected" });
+              var st = document.getElementById("callStatus"); if (st) st.innerText = "Connected";
+              var ab = document.getElementById("acceptBtn"); if (ab) ab.style.display = "none";
+              startTimer();
+              listenCallDoc();
+            } catch (e) {
+              showCallUI("Call", "voice", "Call failed: " + (e && e.message ? e.message : e));
+            }
           };
 
           var _origStartApp = window.startApp;
@@ -250,8 +312,8 @@ jobs:
                 applicationId "com.mebook.app"
                 minSdk 24
                 targetSdk 34
-                versionCode 2
-                versionName "1.1"
+                versionCode 3
+                versionName "1.2"
             }
             buildTypes {
                 release {
@@ -367,12 +429,9 @@ jobs:
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                     setShowWhenLocked(true);
                     setTurnScreenOn(true);
-                    KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
-                    if (km != null) km.requestDismissKeyguard(this, null);
                 }
                 getWindow().addFlags(
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
                 );
@@ -421,13 +480,34 @@ jobs:
 
                 findViewById(R.id.btnAccept).setOnClickListener(v -> {
                     stopRingtone();
-                    Intent i = new Intent(this, MainActivity.class);
-                    i.putExtra("openChat", fromUid != null ? fromUid : "");
-                    i.putExtra("acceptCall", callId != null ? callId : "");
-                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-                    startActivity(i);
-                    finish();
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+                        if (km != null && km.isKeyguardLocked()) {
+                            km.requestDismissKeyguard(this, new KeyguardManager.KeyguardDismissCallback() {
+                                @Override
+                                public void onDismissSucceeded() {
+                                    openMainAndAccept();
+                                }
+                                @Override
+                                public void onDismissCancelled() {
+                                    finish();
+                                }
+                            });
+                            return;
+                        }
+                    }
+                    openMainAndAccept();
                 });
+            }
+
+            private void openMainAndAccept() {
+                stopRingtone();
+                Intent i = new Intent(this, MainActivity.class);
+                i.putExtra("openChat", fromUid != null ? fromUid : "");
+                i.putExtra("acceptCall", callId != null ? callId : "");
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                startActivity(i);
+                finish();
             }
 
             private void sendDeclineToServer() {
@@ -668,6 +748,8 @@ jobs:
         import com.google.firebase.messaging.FirebaseMessaging;
         import java.io.ByteArrayOutputStream;
         import java.io.InputStream;
+        import java.util.ArrayList;
+        import java.util.List;
 
         public class MainActivity extends AppCompatActivity {
             private WebView webView;
@@ -718,12 +800,19 @@ jobs:
                 webView = new WebView(this);
                 setContentView(webView);
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                        ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA}, 101);
-                    }
-                } else {
-                    ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA}, 101);
+                List<String> perms = new ArrayList<>();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    perms.add(Manifest.permission.POST_NOTIFICATIONS);
+                }
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    perms.add(Manifest.permission.RECORD_AUDIO);
+                }
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                    perms.add(Manifest.permission.CAMERA);
+                }
+                if (!perms.isEmpty()) {
+                    ActivityCompat.requestPermissions(this, perms.toArray(new String[0]), 101);
                 }
 
                 if (Build.VERSION.SDK_INT >= 34) {
